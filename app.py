@@ -11,6 +11,22 @@ from utils.report_writer import export_validation_report
 from utils.validator import build_summary
 
 
+NUMERIC_COLUMNS = [
+    "inspection_quantity",
+    "defective_quantity",
+    "nominal_value",
+    "positive_tolerance",
+    "negative_tolerance",
+    "calculated_upper_limit",
+    "calculated_lower_limit",
+    "listed_upper_limit",
+    "listed_lower_limit",
+    "measurement_value",
+    "difference_from_nominal",
+]
+LIMIT_HIT_EPSILON = 1e-9
+
+
 st.set_page_config(page_title="Injection In-Process Inspection Checker", layout="wide")
 st.title("Injection In-Process Inspection Checker")
 st.caption(
@@ -25,7 +41,48 @@ def _parse_uploaded_file(file_bytes: bytes, file_name: str, parser_version: str)
     return parse_workbook(buffer)
 
 
-PARSER_VERSION = "metadata-box-v3-rounding-inclusive"
+PARSER_VERSION = "metadata-box-v4-risk-table-two-decimals"
+
+
+def round_numeric_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
+    rounded = dataframe.copy()
+    for column in NUMERIC_COLUMNS:
+        if column in rounded.columns:
+            rounded[column] = pd.to_numeric(rounded[column], errors="coerce").round(2)
+    return rounded
+
+
+def style_status_rows(dataframe: pd.DataFrame):
+    return dataframe.style.format(precision=2, na_rep="").apply(
+        lambda row: [
+            "background-color: #F4CCCC; color: #000000"
+            if row.get("status") == "FAIL"
+            else "background-color: #E2F0D9; color: #000000"
+            if row.get("status") == "PASS"
+            else "background-color: #FFF2CC; color: #000000"
+            for _ in row
+        ],
+        axis=1,
+    )
+
+
+def build_limit_hit_table(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if dataframe.empty:
+        return dataframe.copy()
+    required = {"measurement_value", "calculated_lower_limit", "calculated_upper_limit"}
+    if not required.issubset(dataframe.columns):
+        return dataframe.iloc[0:0].copy()
+
+    lower_hit = (dataframe["measurement_value"] - dataframe["calculated_lower_limit"]).abs() <= LIMIT_HIT_EPSILON
+    upper_hit = (dataframe["measurement_value"] - dataframe["calculated_upper_limit"]).abs() <= LIMIT_HIT_EPSILON
+    limit_hits = dataframe[lower_hit | upper_hit].copy()
+    if limit_hits.empty:
+        return limit_hits
+
+    limit_hits["hit_limit"] = "LOWER"
+    limit_hits.loc[upper_hit.loc[limit_hits.index], "hit_limit"] = "UPPER"
+    limit_hits["risk_note"] = "Measurement is exactly on specification limit"
+    return limit_hits
 
 
 st.subheader("Step 1: Upload Excel File")
@@ -54,6 +111,9 @@ except Exception:
 detail_df = pd.DataFrame(parsed["detail_rows"], columns=parsed["detail_df_columns"])
 sheet_summary_df = pd.DataFrame(parsed["sheet_summaries"])
 dimension_summary_df = pd.DataFrame(parsed["dimension_summaries"])
+detail_df = round_numeric_columns(detail_df)
+sheet_summary_df = round_numeric_columns(sheet_summary_df)
+dimension_summary_df = round_numeric_columns(dimension_summary_df)
 
 summary = build_summary(detail_df, sheet_summary_df, dimension_summary_df)
 
@@ -102,10 +162,30 @@ if parsed["warnings"]:
 results_tab, sheets_tab, charts_tab = st.tabs(["Validation Table", "Workbook Summary", "Charts"])
 
 with results_tab:
+    display_cols = [
+        "sheet_name",
+        "inspection_time",
+        "dimension_display_name",
+        "nominal_value",
+        "calculated_lower_limit",
+        "calculated_upper_limit",
+        "measurement_value",
+        "status",
+        "source_cell",
+    ]
     if filtered_df.empty:
         st.info("No rows match the current filters.")
     else:
-        display_cols = [
+        display_df = filtered_df[display_cols].copy()
+        st.dataframe(style_status_rows(display_df), use_container_width=True, hide_index=True)
+
+    st.subheader("Exact Limit Hits")
+    st.caption("These PASS measurements are exactly equal to the lower or upper specification limit and should be reviewed as higher risk.")
+    limit_hit_df = build_limit_hit_table(filtered_df)
+    if limit_hit_df.empty:
+        st.info("No exact upper/lower limit hits for the current filters.")
+    else:
+        risk_cols = [
             "sheet_name",
             "inspection_time",
             "dimension_display_name",
@@ -113,25 +193,19 @@ with results_tab:
             "calculated_lower_limit",
             "calculated_upper_limit",
             "measurement_value",
+            "hit_limit",
             "status",
             "source_cell",
+            "risk_note",
         ]
-        display_df = filtered_df[display_cols].copy()
-        styled = display_df.style.apply(
-            lambda row: [
-                "background-color: #F4CCCC; color: #000000"
-                if row["status"] == "FAIL"
-                else "background-color: #E2F0D9; color: #000000"
-                if row["status"] == "PASS"
-                else "background-color: #FFF2CC; color: #000000"
-                for _ in row
-            ],
-            axis=1,
+        st.dataframe(
+            style_status_rows(limit_hit_df[risk_cols].copy()),
+            use_container_width=True,
+            hide_index=True,
         )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
 
     if not filtered_df.empty:
-        csv_data = filtered_df.to_csv(index=False).encode("utf-8-sig")
+        csv_data = round_numeric_columns(filtered_df).to_csv(index=False, float_format="%.2f").encode("utf-8-sig")
         excel_data = export_validation_report(
             detail_df=detail_df,
             sheet_summary_df=sheet_summary_df,
