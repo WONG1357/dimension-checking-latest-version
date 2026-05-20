@@ -25,7 +25,7 @@ def _parse_uploaded_file(file_bytes: bytes, file_name: str, parser_version: str)
     return parse_workbook(buffer)
 
 
-PARSER_VERSION = "metadata-box-v2"
+PARSER_VERSION = "metadata-box-v3-rounding-inclusive"
 
 
 st.subheader("Step 1: Upload Excel File")
